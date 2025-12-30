@@ -2,11 +2,6 @@
   "version": 2,
   "buildCommand": "npm run build",
   "framework": "vite",
-  "functions": {
-    "api/**/*.js": {
-      "runtime": "nodejs20"
-    }
-  },
   "rewrites": [
     {
       "source": "/api/(.*)",
