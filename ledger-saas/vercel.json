@@ -1,0 +1,39 @@
+{
+  "version": 2,
+  "buildCommand": "npm run build",
+  "framework": "vite",
+  "env": {
+    "WHATSAPP_VERIFY_TOKEN": "@whatsapp_verify_token",
+    "META_APP_SECRET": "@meta_app_secret",
+    "BACKEND_INGEST_URL": "@backend_ingest_url",
+    "BACKEND_SHARED_SECRET": "@backend_shared_secret",
+    "TENANT_ROUTING_JSON": "@tenant_routing_json"
+  },
+  "functions": {
+    "api/**/*.js": {
+      "runtime": "nodejs20.x"
+    }
+  },
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/$1",
+      "methods": ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"]
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/index.html"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "no-cache, no-store, must-revalidate"
+        }
+      ]
+    }
+  ]
+}
