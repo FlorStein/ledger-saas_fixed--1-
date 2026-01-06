@@ -311,6 +311,34 @@ async def verify_webhook_auth(request: Request) -> dict:
     return {"verified": True}
 
 
+@router.get("/meta/cloud/health")
+async def meta_cloud_health(db: Session = Depends(get_db)):
+    """Endpoint de diagnóstico para verificar configuración del webhook Meta Cloud."""
+    meta_token = META_WA_TOKEN
+    backend_secret = BACKEND_SHARED_SECRET
+    meta_phone_id = os.getenv("META_WA_PHONE_NUMBER_ID", "")
+    
+    # Check tenant mapping
+    tenant_count = db.query(Tenant).count()
+    channel_count = db.query(Channel).filter(Channel.provider == "meta").count()
+    
+    return {
+        "status": "ok",
+        "config": {
+            "META_WA_TOKEN": "✅ Set" if meta_token else "❌ Missing",
+            "BACKEND_SHARED_SECRET": "✅ Set" if backend_secret else "❌ Missing",
+            "META_WA_PHONE_NUMBER_ID": meta_phone_id if meta_phone_id else "❌ Not set",
+            "tenants": tenant_count,
+            "meta_channels": channel_count,
+        },
+        "notes": [
+            "BACKEND_SHARED_SECRET debe coincidir con el de Vercel",
+            "META_WA_TOKEN se usa para descargar media de Meta Graph API",
+            "META_WA_PHONE_NUMBER_ID debe tener un Channel asociado en DB",
+        ]
+    }
+
+
 @router.post("/meta/cloud")
 async def receive_meta_cloud_events(
     request: Request,

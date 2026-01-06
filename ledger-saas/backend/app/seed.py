@@ -32,6 +32,14 @@ def seed_if_empty(db: Session):
     ch = Channel(tenant_id=t.id, kind="whatsapp", provider="twilio", external_id="sandbox", label="WhatsApp Sandbox")
     db.add(ch)
 
+    # Canal Meta si está configurado
+    meta_phone_number_id = os.getenv("META_WA_PHONE_NUMBER_ID", "")
+    if meta_phone_number_id:
+        ch_meta = Channel(tenant_id=t.id, kind="whatsapp", provider="meta", external_id=meta_phone_number_id, label="Meta Cloud API")
+        db.add(ch_meta)
+        t.phone_number_id = meta_phone_number_id
+        db.add(t)
+
     # Ventas inventadas (solo si SEED_SALES=true)
     if SEED_SALES:
         sales = [
