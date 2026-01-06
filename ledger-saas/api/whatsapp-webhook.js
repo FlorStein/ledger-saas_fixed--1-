@@ -1,256 +1,183 @@
 /**
- * Vercel Serverless Function para WhatsApp Cloud API
- * GET:  Verificación de webhook
- * POST: Recepción de eventos con validación de firma
+ * Vercel Serverless Function - WhatsApp Webhook (Meta Cloud API)
+ * - GET: verifica hub.challenge
+ * - POST: opcionalmente valida firma HMAC, resuelve tenant y reenvía al backend
  */
 
 const crypto = require("crypto");
 
-/**
- * Leer el raw body como Buffer (necesario para validar firma HMAC)
- */
+function getTenantIdFromPhoneNumberId(phoneNumberId) {
+  try {
+    const routing = JSON.parse(process.env.TENANT_ROUTING_JSON || "{}") || {};
+    return routing[phoneNumberId] || "default";
+  } catch (e) {
+    console.warn("⚠️ TENANT_ROUTING_JSON inválido, usando 'default'", e);
+    return "default";
+  }
+}
+
 async function readRawBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("data", (c) => chunks.push(c));
     req.on("end", () => resolve(Buffer.concat(chunks)));
     req.on("error", reject);
   });
 }
 
-/**
- * Validar firma HMAC SHA256
- */
 function validateSignature(rawBody, signature, appSecret) {
-  if (!signature || typeof signature !== "string") return false;
-
+  if (!signature || !appSecret) return true; // si no hay firma, no bloqueamos
+  if (typeof signature !== "string") return false;
   const parts = signature.split("=");
   if (parts.length !== 2) return false;
-
-  const [algorithm, hashHex] = parts;
-  if (algorithm !== "sha256") return false;
-
-  // must be 64 hex chars for sha256
-  if (!/^[a-f0-9]{64}$/i.test(hashHex)) return false;
-
-  const expectedHex = crypto
-    .createHmac("sha256", appSecret)
-    .update(rawBody)
-    .digest("hex");
-
-  const hashBuf = Buffer.from(hashHex, "hex");
-  const expectedBuf = Buffer.from(expectedHex, "hex");
-
-  if (hashBuf.length !== expectedBuf.length) return false;
-
-  return crypto.timingSafeEqual(hashBuf, expectedBuf);
-}
-
-async function getFetch() {
-  if (typeof globalThis.fetch === "function") return globalThis.fetch;
-  const { fetch } = await import("undici");
-  globalThis.fetch = fetch;
-  return fetch;
-}
-
-/**
- * Parsear TENANT_ROUTING_JSON y obtener tenant_id
- */
-function getTenantIdFromPhoneNumberId(phoneNumberId, routingJson) {
+  const [algo, hashHex] = parts;
+  if (algo !== "sha256") return false;
+  const expected = crypto.createHmac("sha256", appSecret).update(rawBody).digest("hex");
   try {
-    const routing = JSON.parse(routingJson);
-    return routing[phoneNumberId] || "default";
-  } catch (e) {
-    console.error("Error parsing TENANT_ROUTING_JSON:", e);
-    return "default";
+    return crypto.timingSafeEqual(Buffer.from(hashHex, "hex"), Buffer.from(expected, "hex"));
+  } catch {
+    return false;
   }
 }
 
-/**
- * Forward al backend (sin bloquear el respuesta)
- */
-async function forwardToBackend(
-  payload,
-  tenantId,
-  phoneNumberId,
-  requestId,
-  senderWaId
-) {
-  const backendUrl = process.env.BACKEND_INGEST_URL;
-  const sharedSecret = process.env.BACKEND_SHARED_SECRET;
-
-  if (!backendUrl) {
-    console.warn("BACKEND_INGEST_URL no configurada, omitiendo forward");
-    return;
-  }
-
-  try {
-    const fetchFn = await getFetch();
-    const response = await fetchFn(backendUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${sharedSecret}`,
-        "X-Tenant-ID": tenantId,
-        "X-Phone-Number-ID": phoneNumberId,
-        "X-Request-ID": requestId,
-        ...(senderWaId ? { "X-Sender-WA-ID": senderWaId } : {}),
-      },
-      body: JSON.stringify({
-        tenant_id: tenantId,
-        phone_number_id: phoneNumberId,
-        sender_wa_id: senderWaId,
-        payload: payload,
-        timestamp: new Date().toISOString(),
-        request_id: requestId,
-      }),
-    });
-
-    if (!response.ok) {
-      console.error(
-        `Backend returned status ${response.status}: ${await response.text()}`
-      );
-    }
-  } catch (error) {
-    console.error("Error forwarding to backend:", error.message);
-    // No relanzo el error, el webhook ya respondió 200 a Meta
-  }
-}
-
-/**
- * Handler principal
- */
-export default async function handler(req, res) {
-  const method = req.method;
-  const requestId =
-    typeof crypto.randomUUID === "function"
-      ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+module.exports = async function handler(req, res) {
+  console.log("🔔 WEBHOOK INVOCADO - Método:", req.method);
+  console.log("🔔 URL:", req.url);
+  
+  const { method } = req;
 
   // ============================================
-  // GET: Verificación de webhook
+  // GET - Verificación del Webhook
   // ============================================
   if (method === "GET") {
-    const hubMode = req.query["hub.mode"];
-    const hubVerifyToken = req.query["hub.verify_token"];
-    const hubChallenge = req.query["hub.challenge"];
+    const mode = req.query["hub.mode"];
+    const token = req.query["hub.verify_token"];
+    const challenge = req.query["hub.challenge"];
 
-    const expectedToken = process.env.WHATSAPP_VERIFY_TOKEN;
+    // Verificar que los parámetros existan
+    if (!mode || !token || !challenge) {
+      console.log("❌ GET: Parámetros faltantes");
+      return res.status(400).send("Missing parameters");
+    }
 
-    console.log(
-      `[GET][${requestId}] Verification request - mode: ${hubMode}, token match: ${
-        hubVerifyToken === expectedToken
-      }`
-    );
-
-    if (hubMode === "subscribe" && hubVerifyToken === expectedToken) {
-      console.log(`[GET][${requestId}] ✅ Verification successful`);
-      return res.status(200).send(hubChallenge);
+    // Verificar el token
+    const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN;
+    
+    if (mode === "subscribe" && token === verifyToken) {
+      console.log("✅ GET: Webhook verificado correctamente");
+      return res.status(200).send(challenge);
     } else {
-      console.warn(`[GET][${requestId}] ❌ Verification failed - invalid token`);
-      return res.status(403).json({ error: "Verification failed" });
+      console.log("❌ GET: Token de verificación incorrecto");
+      return res.status(403).send("Verification token mismatch");
     }
   }
 
   // ============================================
-  // POST: Recepción de eventos
+  // POST - Recepción de Eventos
   // ============================================
   if (method === "POST") {
+    console.log("📨 POST RECIBIDO!");
+    let rawBody;
     try {
-      // 1. Leer raw body para validar firma
-      const rawBody = await readRawBody(req);
+      rawBody = await readRawBody(req);
+    } catch (e) {
+      console.error("❌ No se pudo leer raw body", e);
+      return res.status(400).send("Bad Request");
+    }
 
-      // 2. Validar firma HMAC
-      const signature =
-        req.headers["x-hub-signature-256"] ||
-        req.headers["X-Hub-Signature-256"];
-      const appSecret = process.env.META_APP_SECRET;
+    const signature = req.headers["x-hub-signature-256"];
+    const appSecret = process.env.META_APP_SECRET;
+    if (appSecret && signature) {
+      const ok = validateSignature(rawBody, signature, appSecret);
+      if (!ok) {
+        console.warn("❌ Firma inválida");
+        return res.status(401).send("Invalid signature");
+      }
+    }
 
-      if (!signature || !appSecret) {
-        console.error(`[POST][${requestId}] ❌ Missing signature or app secret`);
-        return res.status(401).json({ error: "Unauthorized" });
+    let body = {};
+    try {
+      body = JSON.parse(rawBody.toString("utf8") || "{}");
+    } catch (err) {
+      console.error("❌ JSON inválido", err);
+      return res.status(200).json({ ok: true });
+    }
+
+    try {
+      let phoneNumberId = null;
+      let tenantId = "default";
+      const extractedMessages = [];
+
+      if (body.entry && body.entry.length > 0) {
+        const entry = body.entry[0];
+        if (entry.changes && entry.changes.length > 0) {
+          const change = entry.changes[0];
+          phoneNumberId = change?.value?.metadata?.phone_number_id || change?.value?.metadata?.display_phone_number || entry.id || null;
+          tenantId = getTenantIdFromPhoneNumberId(phoneNumberId);
+          if (change.value && change.value.messages) {
+            const messages = change.value.messages;
+            messages.forEach((msg) => {
+              extractedMessages.push({
+                from: msg.from,
+                type: msg.type,
+                text: msg.text?.body || msg.type,
+                timestamp: msg.timestamp,
+                id: msg.id,
+              });
+            });
+          }
+        }
       }
 
-      let isValidSignature = false;
-      try {
-        isValidSignature = validateSignature(rawBody, signature, appSecret);
-      } catch (e) {
-        console.error(
-          `[POST][${requestId}] ❌ Signature validation error: ${e.message}`
-        );
-        return res.status(401).json({ error: "Signature validation failed" });
+      // Forward al backend para que use el mismo pipeline que el chat web
+      const backendUrl = process.env.BACKEND_INGEST_URL;
+      const sharedSecret = process.env.BACKEND_SHARED_SECRET;
+
+      if (!backendUrl || !sharedSecret) {
+        console.warn("⚠️ BACKEND_INGEST_URL o BACKEND_SHARED_SECRET no configurados, no se reenvía");
+      } else {
+        try {
+          const forwardPayload = {
+            tenant_id: tenantId,
+            phone_number_id: phoneNumberId,
+            payload: body,
+            timestamp: new Date().toISOString(),
+          };
+
+          const resp = await fetch(backendUrl, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${sharedSecret}`,
+              "X-Tenant-ID": tenantId,
+              "X-Phone-Number-ID": phoneNumberId || "",
+            },
+            body: JSON.stringify(forwardPayload),
+          });
+
+          const txt = await resp.text();
+          console.log(`➡️ Forwarded to backend (${resp.status}):`, txt.slice(0, 300));
+        } catch (err) {
+          console.error("❌ Error reenviando al backend:", err);
+        }
       }
 
-      if (!isValidSignature) {
-        console.warn(`[POST][${requestId}] ❌ Invalid signature`);
-        return res.status(401).json({ error: "Invalid signature" });
-      }
+      return res.status(200).json({ ok: true, received: true, tenant: tenantId, phone_number_id: phoneNumberId, messages: extractedMessages });
 
-      console.log(`[POST][${requestId}] ✅ Signature validated`);
-
-      // 3. Parsear payload
-      let payload;
-      try {
-        payload = JSON.parse(rawBody.toString("utf-8"));
-      } catch (e) {
-        console.error(`[POST][${requestId}] ❌ Invalid JSON: ${e.message}`);
-        return res.status(400).json({ error: "Invalid JSON" });
-      }
-
-      // 4. Extraer datos relevantes
-      const entry = payload.entry?.[0];
-      const change = entry?.changes?.[0];
-      const value = change?.value;
-
-      const phoneNumberId = value?.metadata?.phone_number_id;
-      const messages = value?.messages || [];
-      const statuses = value?.statuses || [];
-      const senderWaId = messages?.[0]?.from;
-
-      console.log(
-        `[POST][${requestId}] Received event - phone_number_id: ${phoneNumberId}, messages: ${messages.length}, statuses: ${statuses.length}`
-      );
-
-      // 5. Determinar tenant
-      const tenantRoutingJson = process.env.TENANT_ROUTING_JSON || "{}";
-      const tenantId = getTenantIdFromPhoneNumberId(
-        phoneNumberId,
-        tenantRoutingJson
-      );
-
-      console.log(
-        `[POST][${requestId}] Routing to tenant: ${tenantId} (phone_number_id: ${phoneNumberId})`
-      );
-
-      // 6. **RESPONDER RÁPIDO a Meta (SIN esperar el backend)**
-      res.status(200).json({ ok: true });
-
-      // 7. **FORWARD al backend de forma asincrónica (no bloquea la respuesta)**
-      // Iniciar el fetch sin await
-      forwardToBackend(
-        payload,
-        tenantId,
-        phoneNumberId,
-        requestId,
-        senderWaId
-      ).catch((e) => {
-        console.error(
-          `[POST][${requestId}] Unexpected error in forwardToBackend:`,
-          e
-        );
-      });
-      return;
-
-      // Log de éxito
-      console.log(
-        `[POST][${requestId}] ✅ Event processed and forwarded to backend (tenant: ${tenantId}, phone_number_id: ${phoneNumberId})`
-      );
     } catch (error) {
-      console.error(`[POST][${requestId}] ❌ Unexpected error: ${error.message}`);
-      return res.status(500).json({ error: "Internal server error" });
+      console.error("❌ POST: Error:", error);
+      return res.status(200).json({ ok: true });
     }
   }
 
-  // Método no soportado
-  return res.status(405).json({ error: "Method not allowed" });
-}
+  // Método no permitido
+  console.log("❌ Método no soportado:", method);
+  return res.status(405).send("Method Not Allowed");
+};
+
+// Configuración para Vercel
+module.exports.config = {
+  api: {
+    bodyParser: false
+  }
+};

@@ -8,6 +8,7 @@ class Tenant(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(120))
     status: Mapped[str] = mapped_column(String(20), default="active")
+    phone_number_id: Mapped[str | None] = mapped_column(String(40), unique=True, nullable=True)
 
 class User(Base):
     __tablename__ = "users"
@@ -142,3 +143,40 @@ class WhatsAppInboundMessage(Base):
     __mapper_args__ = {
         "eager_defaults": True,
     }
+
+
+class WhatsAppEvent(Base):
+    __tablename__ = "whatsapp_events"
+    __table_args__ = ({"sqlite_autoincrement": True},)
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("tenants.id"), nullable=True)
+    phone_number_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    wa_from: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    message_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    timestamp: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    raw_payload: Mapped[str | None] = mapped_column(String(4000), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(30), default=lambda: datetime.utcnow().isoformat())
+
+    tenant = relationship("Tenant")
+
+
+class IncomingMessage(Base):
+    __tablename__ = "incoming_messages"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "message_id", name="uq_incoming_message"),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("tenants.id"), nullable=True)
+    message_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    sender_wa_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    phone_number_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    msg_type: Mapped[str | None] = mapped_column(String(20), nullable=True)  # text/document/image
+    content: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="queued")  # queued/processing/done
+    timestamp: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(30), default=lambda: datetime.utcnow().isoformat())
+
+    tenant = relationship("Tenant")

@@ -2,13 +2,23 @@ import os
 import tempfile
 import requests
 import logging
+import json
 from fastapi import APIRouter, Depends, Request, HTTPException
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 from datetime import datetime
 
 from ..db import get_db
-from ..models import Channel, Transaction, Counterparty, User, WhatsAppInboundMessage
+from ..models import (
+    Channel,
+    Transaction,
+    Counterparty,
+    User,
+    WhatsAppInboundMessage,
+    WhatsAppEvent,
+    IncomingMessage,
+    Tenant,
+)
 from ..extract import extract_text_from_pdf, detect_doc, parse_by_type
 from .receipts import _resolve_and_match
 
@@ -29,11 +39,38 @@ def _route_tenant_by_provider(db: Session, provider: str, external_id: str) -> i
     ch = db.query(Channel).filter(Channel.kind == "whatsapp", Channel.provider == provider, Channel.external_id == external_id).first()
     return ch.tenant_id if ch else None
 
-def _message_already_processed(db: Session, message_id: str) -> bool:
+
+def _resolve_tenant(db: Session, phone_number_id: str | None, fallback_tenant_id: str | None) -> int | None:
+    # 1) Header-provided tenant id (from Vercel) wins
+    if fallback_tenant_id:
+        try:
+            return int(fallback_tenant_id)
+        except Exception:
+            logger.warning(f"⚠️  Invalid tenant id header: {fallback_tenant_id}")
+
+    # 2) Channel lookup (preferred)
+    if phone_number_id:
+        ch = db.query(Channel).filter(
+            Channel.kind == "whatsapp",
+            Channel.provider == "meta",
+            Channel.external_id == phone_number_id,
+        ).first()
+        if ch:
+            return ch.tenant_id
+
+    # 3) Tenant direct mapping
+    if phone_number_id:
+        tenant = db.query(Tenant).filter(Tenant.phone_number_id == phone_number_id).first()
+        if tenant:
+            return tenant.id
+
+    return None
+
+def _message_already_processed(db: Session, tenant_id: int | None, message_id: str) -> bool:
     """Verificar si un mensaje ya fue procesado (idempotencia por message_id)."""
-    existing = db.query(WhatsAppInboundMessage).filter(
-        WhatsAppInboundMessage.provider == "meta",
-        WhatsAppInboundMessage.message_id == message_id,
+    existing = db.query(IncomingMessage).filter(
+        IncomingMessage.message_id == message_id,
+        IncomingMessage.tenant_id == tenant_id,
     ).first()
     return existing is not None
 
@@ -43,16 +80,19 @@ def _record_inbound_message(
     sender_wa_id: str | None,
     phone_number_id: str | None,
     tenant_id: int | None,
+    msg_type: str | None,
+    content: str | None,
     status: str = "received",
-) -> WhatsAppInboundMessage | None:
+) -> IncomingMessage | None:
     """Registrar mensaje entrante en tabla de idempotencia."""
     try:
-        inbound = WhatsAppInboundMessage(
+        inbound = IncomingMessage(
             tenant_id=tenant_id,
-            provider="meta",
             message_id=message_id,
             sender_wa_id=sender_wa_id,
             phone_number_id=phone_number_id,
+            msg_type=msg_type,
+            content=content,
             created_at=datetime.utcnow().isoformat(),
             status=status,
         )
@@ -301,10 +341,12 @@ async def receive_meta_cloud_events(
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
     # Extraer datos
-    tenant_id = body.get("tenant_id", "default")
-    phone_number_id = body.get("phone_number_id")
+    tenant_header = body.get("tenant_id") or request.headers.get("x-tenant-id")
+    phone_number_id = body.get("phone_number_id") or request.headers.get("x-phone-number-id")
     payload = body.get("payload", {})
     timestamp_str = body.get("timestamp", datetime.utcnow().isoformat())
+
+    tenant_id = _resolve_tenant(db, phone_number_id, tenant_header)
 
     logger.info(
         f"📱 Meta Cloud Event - tenant: {tenant_id}, phone_number_id: {phone_number_id}"
@@ -320,29 +362,27 @@ async def receive_meta_cloud_events(
         statuses = value.get("statuses", [])
         contacts = value.get("contacts", [])
 
-        # Procesar contactos (crear o actualizar Counterparty)
+        # Persist raw event for debugging/traceability
+        try:
+            evt = WhatsAppEvent(
+                tenant_id=tenant_id,
+                phone_number_id=phone_number_id,
+                wa_from=messages[0].get("from") if messages else None,
+                message_id=messages[0].get("id") if messages else None,
+                timestamp=timestamp_str,
+                raw_payload=json.dumps(payload)[:3800],
+            )
+            db.add(evt)
+            db.commit()
+        except Exception as e:
+            logger.warning(f"⚠️  Could not persist WhatsAppEvent: {str(e)}")
+            db.rollback()
+
+        # Procesar contactos (solo log, el modelo de Counterparty no incluye campos WA)
         for contact in contacts:
             contact_name = contact.get("profile", {}).get("name", "Unknown")
             contact_wa_id = contact.get("wa_id")
-
-            if contact_wa_id:
-                counterparty = db.query(Counterparty).filter(
-                    Counterparty.tenant_id == int(tenant_id) if tenant_id.isdigit() else 1,
-                    Counterparty.whatsapp_id == contact_wa_id,
-                ).first()
-
-                if not counterparty:
-                    counterparty = Counterparty(
-                        tenant_id=int(tenant_id) if tenant_id.isdigit() else 1,
-                        name=contact_name,
-                        whatsapp_id=contact_wa_id,
-                        metadata={"phone_number_id": phone_number_id},
-                    )
-                    db.add(counterparty)
-                    db.commit()
-                    logger.info(
-                        f"✨ Created new Counterparty: {contact_name} ({contact_wa_id})"
-                    )
+            logger.info(f"👤 Contact: {contact_name} ({contact_wa_id})")
 
         # Procesar mensajes
         for message in messages:
@@ -353,7 +393,7 @@ async def receive_meta_cloud_events(
             logger.info(f"📨 Message - id: {msg_id}, type: {msg_type}, from: {from_wa_id}")
 
             # Verificar idempotencia por message_id
-            if _message_already_processed(db, msg_id):
+            if _message_already_processed(db, tenant_id, msg_id):
                 logger.info(f"  ↩️  Message {msg_id} already processed, skipping")
                 continue
 
@@ -363,7 +403,9 @@ async def receive_meta_cloud_events(
                 message_id=msg_id,
                 sender_wa_id=from_wa_id,
                 phone_number_id=phone_number_id,
-                tenant_id=int(tenant_id) if tenant_id.isdigit() else 1,
+                tenant_id=tenant_id,
+                msg_type=msg_type,
+                content=json.dumps(message).replace("\\n", " ")[:500],
                 status="received",
             )
 
@@ -414,7 +456,7 @@ async def receive_meta_cloud_events(
                 
                 # Crear Transaction
                 tx = Transaction(
-                    tenant_id=tenant_id,
+                    tenant_id=tenant_id or 1,
                     source_file=safe_filename,
                     source_system="whatsapp",
                     doc_type=parsed.get("doc_type", "document"),
