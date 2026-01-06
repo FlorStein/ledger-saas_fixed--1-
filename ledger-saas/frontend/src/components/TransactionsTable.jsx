@@ -23,7 +23,7 @@ export default function TransactionsTable({ rows }) {
         <thead>
           <tr>
             <th>ID</th>
-            <th>Paciente / Contraparte</th>
+            <th>Cliente / Contraparte</th>
             <th>Último movimiento</th>
             <th>Monto</th>
             <th>Match</th>

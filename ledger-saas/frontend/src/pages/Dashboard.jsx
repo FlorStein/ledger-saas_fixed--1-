@@ -10,28 +10,29 @@ import CreateUser from "../components/CreateUser.jsx";
 import UsersTable from "../components/UsersTable.jsx";
 import { apiFetch } from "../api.js";
 
-function Sidebar({ active, setActive }) {
+function Sidebar({ active, setActive, setTab, onLogout }) {
   const items = [
-    { key:"ledger", label:"Ledger" },
-    { key:"sales", label:"Ventas" },
-    { key:"users", label:"Users" },
-    { key:"tasks", label:"Tareas" },
-    { key:"settings", label:"Settings" },
+    { key:"ledger", label:"Comprobantes", icon:"📑", tab:"Comprobantes" },
+    { key:"sales", label:"Ventas", icon:"💰", tab:"Ventas" },
+    { key:"clients", label:"Clientes", icon:"👥", tab:"Clientes" },
+    { key:"campaigns", label:"Campañas", icon:"📣", tab:"Campañas" },
+    { key:"stats", label:"Estadísticas", icon:"📊", tab:"Estadísticas" },
+    { key:"settings", label:"Configuración", icon:"⚙️", tab:"Configuración" },
   ];
   return (
     <div className="sidebarWrap card" style={{ padding: 10, border: "none" }}>
       <div className="sidebar">
-        <div className="navbtn active" title="Home" style={{ marginBottom: 6 }}>L</div>
+        <div className="navbtn active" title="Home" style={{ marginBottom: 6 }}>🏠</div>
         {items.map(it => (
           <div key={it.key}
                className={"navbtn " + (active===it.key ? "active": "")}
                title={it.label}
-               onClick={()=>setActive(it.key)}>
-            {it.label[0]}
+               onClick={()=>{ setActive(it.key); setTab(it.tab); }}>
+            {it.icon}
           </div>
         ))}
         <div style={{ flex: 1 }} />
-        <div className="navbtn" title="Logout">⚙</div>
+        <div className="navbtn" title="Logout" onClick={onLogout}>🚪</div>
       </div>
     </div>
   );
@@ -45,6 +46,7 @@ export default function Dashboard({ onLogout }) {
   const [active, setActive] = useState("ledger");
   const [search, setSearch] = useState("");
   const [err, setErr] = useState(null);
+  const [showPassword, setShowPassword] = useState(false);
 
   async function refreshAll() {
     setErr(null);
@@ -62,6 +64,19 @@ export default function Dashboard({ onLogout }) {
     }
   }
   useEffect(() => { refreshAll(); }, []);
+
+  const currentUser = useMemo(() => {
+    if (users && users.length) {
+      return users.find(u => u.role === "owner") || users[0];
+    }
+    return null;
+  }, [users]);
+
+  const accountInfo = {
+    username: currentUser?.email?.split("@")?.[0] || "—",
+    email: currentUser?.email || "—",
+    password: currentUser?.password_placeholder || "demo123",
+  };
 
   const kpis = useMemo(() => {
     const total = tx.reduce((a,r)=>a+(r.amount||0),0);
@@ -94,9 +109,44 @@ export default function Dashboard({ onLogout }) {
     );
   }, [sales, search]);
 
+  const customers = useMemo(() => {
+    const byKey = new Map();
+    sales.forEach((s) => {
+      const key = (s.customer_name || "Sin nombre") + (s.customer_phone || "");
+      const current = byKey.get(key) || {
+        name: s.customer_name || "Sin nombre",
+        phone: s.customer_phone || "-",
+        lastSale: s.datetime || s.created_at || "",
+        totalAmount: 0,
+        count: 0,
+      };
+      current.totalAmount += Number(s.amount || 0);
+      current.count += 1;
+      current.lastSale = s.datetime || current.lastSale;
+      byKey.set(key, current);
+    });
+    return Array.from(byKey.values());
+  }, [sales]);
+
+  const filteredCustomers = useMemo(() => {
+    const s = search.trim().toLowerCase();
+    if (!s) return customers;
+    return customers.filter((c) =>
+      (c.name || "").toLowerCase().includes(s) ||
+      (c.phone || "").toLowerCase().includes(s)
+    );
+  }, [customers, search]);
+
+  const resultsCount = useMemo(() => {
+    if (tab === "Ventas") return filteredSales.length;
+    if (tab === "Users") return users.length;
+    if (tab === "Clientes") return filteredCustomers.length;
+    return filteredTx.length;
+  }, [tab, filteredSales, filteredCustomers, filteredTx, users]);
+
   return (
     <div className="layout">
-      <Sidebar active={active} setActive={setActive} />
+      <Sidebar active={active} setActive={setActive} setTab={setTab} onLogout={onLogout} />
 
       <div className="main">
         <div className="card topbar">
@@ -113,7 +163,7 @@ export default function Dashboard({ onLogout }) {
 
         <div className="card">
           <div className="tabs">
-            {["Comprobantes","Ventas","Users","Campañas","Cumpleaños"].map(t => (
+            {["Comprobantes","Ventas","Users","Campañas","Clientes","Estadísticas","Configuración"].map(t => (
               <div key={t} className={"tab " + (tab===t ? "active": "")} onClick={()=>setTab(t)}>{t}</div>
             ))}
           </div>
@@ -136,7 +186,7 @@ export default function Dashboard({ onLogout }) {
               </select>
             </div>
             <div style={{ flex: 1 }} />
-            <div className="badge dot">Resultados: {tab === "Ventas" ? filteredSales.length : filteredTx.length}</div>
+            <div className="badge dot">Resultados: {resultsCount}</div>
           </div>
         </div>
 
@@ -197,6 +247,192 @@ export default function Dashboard({ onLogout }) {
               </div>
               <div style={{ marginTop: 12 }}>
                 <SalesTable rows={filteredSales} />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {tab === "Clientes" && (
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+            <div className="card" style={{ padding: 12 }}>
+              <div style={{ fontWeight: 800, marginBottom: 8 }}>Clientes</div>
+              <div style={{ color:"var(--muted)", fontSize: 13, marginBottom: 12 }}>
+                Resumen generado a partir de las ventas cargadas (nombre, teléfono, volumen y última compra).
+              </div>
+              <div style={{ maxHeight: 420, overflowY: "auto" }}>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>Nombre</th>
+                      <th>Teléfono</th>
+                      <th>Órdenes</th>
+                      <th>Última compra</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredCustomers.map((c, idx) => (
+                      <tr key={idx}>
+                        <td>{c.name}</td>
+                        <td>{c.phone}</td>
+                        <td>{c.count}</td>
+                        <td>${c.totalAmount.toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                        <td>{c.lastSale ? new Date(c.lastSale).toLocaleDateString("es-AR") : "-"}</td>
+                      </tr>
+                    ))}
+                    {filteredCustomers.length === 0 && (
+                      <tr><td colSpan="5" style={{ textAlign:"center", color:"var(--muted)" }}>Sin clientes aún</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div className="card" style={{ padding: 12 }}>
+              <div style={{ fontWeight: 800, marginBottom: 8 }}>Acciones rápidas</div>
+              <ul style={{ margin: 0, paddingLeft: 16, color:"var(--muted)", lineHeight: 1.6 }}>
+                <li>Exportar cartera para campañas</li>
+                <li>Enviar recordatorios de pago a deudores</li>
+                <li>Crear segmento por volumen o frecuencia</li>
+                <li>Registrar una nota sobre el cliente</li>
+              </ul>
+            </div>
+          </div>
+        )}
+
+        {tab === "Estadísticas" && (
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+            <div className="card" style={{ padding: 12 }}>
+              <div style={{ fontWeight: 800, marginBottom: 8 }}>Resumen rápido</div>
+              <div style={{ display:"grid", gap:10 }}>
+                <div className="kpi">
+                  <div className="label">Oportunidad total</div>
+                  <div className="value">{kpis.total.toLocaleString("es-AR",{minimumFractionDigits:2, maximumFractionDigits:2})} ARS</div>
+                </div>
+                <div className="kpi">
+                  <div className="label">Pendientes de revisión</div>
+                  <div className="value">{kpis.review}</div>
+                </div>
+                <div className="kpi">
+                  <div className="label">Matcheadas</div>
+                  <div className="value">{kpis.matched}</div>
+                </div>
+              </div>
+            </div>
+            <div className="card" style={{ padding: 12 }}>
+              <div style={{ fontWeight: 800, marginBottom: 8 }}>Próximas mejoras</div>
+              <ul style={{ margin:0, paddingLeft:16, color:"var(--muted)", lineHeight:1.6 }}>
+                <li>Embudo por origen de ingreso</li>
+                <li>Tiempo medio de conciliación</li>
+                <li>Alertas de riesgo en clientes</li>
+              </ul>
+            </div>
+          </div>
+        )}
+
+        {tab === "Configuración" && (
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+            <div className="card" style={{ padding: 12 }}>
+              <div style={{ fontWeight: 800, marginBottom: 8 }}>Preferencias básicas</div>
+              <div style={{ display:"grid", gap:12 }}>
+                <div style={{ display:"grid", gap:8 }}>
+                  <div style={{ fontSize:12, color:"var(--muted)" }}>Alertas</div>
+                  <label style={{ display:"grid", gridTemplateColumns:"1fr auto", alignItems:"center", columnGap:12 }}>
+                    <span>Notificaciones por email</span>
+                    <input type="checkbox" defaultChecked style={{ width:18, height:18, minWidth:18 }} />
+                  </label>
+                  <label style={{ display:"grid", gridTemplateColumns:"1fr auto", alignItems:"center", columnGap:12 }}>
+                    <span>Avisar transacciones sin match</span>
+                    <input type="checkbox" style={{ width:18, height:18, minWidth:18 }} />
+                  </label>
+                </div>
+                <div style={{ display:"grid", gap:6 }}>
+                  <div style={{ fontSize:12, color:"var(--muted)" }}>Moneda por defecto</div>
+                  <select defaultValue="ARS">
+                    <option value="ARS">ARS</option>
+                    <option value="USD">USD</option>
+                  </select>
+                  <div style={{ fontSize:12, color:"var(--muted)" }}>Usada para KPIs y totales.</div>
+                </div>
+                <div style={{ display:"flex", justifyContent:"flex-end" }}>
+                  <button className="secondary">Guardar preferencias</button>
+                </div>
+              </div>
+            </div>
+            <div className="card" style={{ padding: 12 }}>
+              <div style={{ fontWeight: 800, marginBottom: 8 }}>Integraciones</div>
+              <ul style={{ margin:0, paddingLeft:16, color:"var(--muted)", lineHeight:1.6 }}>
+                <li>WhatsApp Cloud API</li>
+                <li>Exportar a Excel</li>
+                <li>Webhook de ingestión</li>
+              </ul>
+            </div>
+            <div className="card" style={{ padding: 12 }}>
+              <div style={{ fontWeight: 800, marginBottom: 8 }}>Información de cuenta</div>
+              <div style={{ color:"var(--muted)", fontSize: 13, marginBottom: 10 }}>
+                Datos actuales del usuario. Puedes ver la contraseña temporalmente con el icono de ojo.
+              </div>
+              <div style={{ display:"grid", gap:10 }}>
+                <div>
+                  <div style={{ fontSize:12, color:"var(--muted)" }}>Usuario</div>
+                  <div style={{ fontWeight:700 }}>{accountInfo.username}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize:12, color:"var(--muted)" }}>Email</div>
+                  <div style={{ fontWeight:700 }}>{accountInfo.email}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize:12, color:"var(--muted)" }}>Contraseña</div>
+                  <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                    <span style={{ fontFamily:"monospace" }}>
+                      {showPassword ? accountInfo.password : "••••••••"}
+                    </span>
+                    <button className="secondary" onClick={()=>setShowPassword(v=>!v)}>{showPassword ? "👁‍🗨 Ocultar" : "👁 Ver"}</button>
+                  </div>
+                  {showPassword && (
+                    <div style={{ color:"var(--muted)", fontSize: 12, marginTop: 4 }}>
+                      Demo: mostramos la clave que usaste al ingresar (en producción se almacena hasheada).
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+            <div className="card" style={{ padding: 12 }}>
+              <div style={{ fontWeight: 800, marginBottom: 8 }}>Seguridad de cuenta</div>
+              <div style={{ color:"var(--muted)", fontSize: 13, marginBottom: 10 }}>
+                Cambia tu usuario y clave. Enviamos un código al email (y opcionalmente a WhatsApp) para validar la identidad antes de aplicar cambios.
+              </div>
+              <div style={{ display:"grid", gap:10 }}>
+                <label style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                  <span>Nuevo usuario</span>
+                  <input type="text" placeholder="tu.nuevo.usuario" />
+                </label>
+                <label style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                  <span>Nuevo email</span>
+                  <input type="email" placeholder="tu@mail.com" />
+                </label>
+                <label style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                  <span>Nueva contraseña</span>
+                  <input type="password" placeholder="********" />
+                </label>
+                <label style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                  <span>Código enviado al email</span>
+                  <input type="text" placeholder="123456" />
+                </label>
+                <label style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                  <span>WhatsApp para 2FA</span>
+                  <input type="tel" placeholder="Ej: +54911..." />
+                </label>
+                <label style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                  <span>Código enviado por WhatsApp</span>
+                  <input type="text" placeholder="654321" />
+                </label>
+                <div style={{ display:"flex", gap:8 }}>
+                  <button>Enviar código email</button>
+                  <button>Enviar código WhatsApp</button>
+                  <button className="secondary">Guardar cambios</button>
+                </div>
+                <div style={{ color:"var(--muted)", fontSize: 12 }}>
+                  Se requiere validación por correo y/o WhatsApp para evitar cambios no autorizados.
+                </div>
               </div>
             </div>
           </div>
