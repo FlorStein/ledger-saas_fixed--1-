@@ -314,27 +314,52 @@ async def verify_webhook_auth(request: Request) -> dict:
 @router.get("/meta/cloud/health")
 async def meta_cloud_health(db: Session = Depends(get_db)):
     """Endpoint de diagnóstico para verificar configuración del webhook Meta Cloud."""
+    from datetime import datetime
+    
     meta_token = META_WA_TOKEN
     backend_secret = BACKEND_SHARED_SECRET
     meta_phone_id = os.getenv("META_WA_PHONE_NUMBER_ID", "")
     
-    # Check tenant mapping
-    tenant_count = db.query(Tenant).count()
-    channel_count = db.query(Channel).filter(Channel.provider == "meta").count()
+    # Get all tenants with their Meta channels
+    tenants = db.query(Tenant).all()
+    meta_channels = db.query(Channel).filter(Channel.provider == "meta").all()
+    
+    tenants_list = [
+        {
+            "id": t.id,
+            "name": t.name or t.id,
+            "phone_number_id": t.phone_number_id or "not_set",
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+            "channels": [
+                {
+                    "external_id": c.external_id,
+                    "kind": c.kind or "whatsapp",
+                    "created_at": c.created_at.isoformat() if c.created_at else None,
+                }
+                for c in meta_channels if c.tenant_id == t.id
+            ]
+        }
+        for t in tenants
+    ]
     
     return {
-        "status": "ok",
-        "config": {
-            "META_WA_TOKEN": "✅ Set" if meta_token else "❌ Missing",
-            "BACKEND_SHARED_SECRET": "✅ Set" if backend_secret else "❌ Missing",
-            "META_WA_PHONE_NUMBER_ID": meta_phone_id if meta_phone_id else "❌ Not set",
-            "tenants": tenant_count,
-            "meta_channels": channel_count,
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "environment": {
+            "META_WA_TOKEN": "✅ Configured" if meta_token else "❌ Missing",
+            "BACKEND_SHARED_SECRET": "✅ Configured" if backend_secret else "❌ Missing",
+            "META_WA_PHONE_NUMBER_ID": meta_phone_id if meta_phone_id else "❌ Not configured",
+        },
+        "database": {
+            "total_tenants": len(tenants),
+            "meta_channels": len(meta_channels),
+            "tenants": tenants_list,
         },
         "notes": [
-            "BACKEND_SHARED_SECRET debe coincidir con el de Vercel",
-            "META_WA_TOKEN se usa para descargar media de Meta Graph API",
-            "META_WA_PHONE_NUMBER_ID debe tener un Channel asociado en DB",
+            "BACKEND_SHARED_SECRET must match Vercel secret",
+            "META_WA_TOKEN is used for downloading media from Meta Graph API",
+            "META_WA_PHONE_NUMBER_ID must have a Channel entry in DB (created by seed.py)",
+            "Each tenant can have multiple Meta channels (for multi-phone scenarios)",
         ]
     }
 

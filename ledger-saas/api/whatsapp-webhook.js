@@ -6,6 +6,10 @@
 
 const crypto = require("crypto");
 
+function generateRequestId() {
+  return `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+}
+
 function getTenantIdFromPhoneNumberId(phoneNumberId) {
   try {
     const routing = JSON.parse(process.env.TENANT_ROUTING_JSON || "{}") || {};
@@ -41,8 +45,8 @@ function validateSignature(rawBody, signature, appSecret) {
 }
 
 module.exports = async function handler(req, res) {
-  console.log("🔔 WEBHOOK INVOCADO - Método:", req.method);
-  console.log("🔔 URL:", req.url);
+  const requestId = generateRequestId();
+  console.log(`[${requestId}] 🔔 WEBHOOK ${req.method}`);
   
   const { method } = req;
 
@@ -105,7 +109,7 @@ module.exports = async function handler(req, res) {
 
     try {
       let phoneNumberId = null;
-      let tenantId = "default";
+      let senderWaId = null;
       const extractedMessages = [];
 
       if (body.entry && body.entry.length > 0) {
@@ -113,10 +117,9 @@ module.exports = async function handler(req, res) {
         if (entry.changes && entry.changes.length > 0) {
           const change = entry.changes[0];
           phoneNumberId = change?.value?.metadata?.phone_number_id || change?.value?.metadata?.display_phone_number || entry.id || null;
-          tenantId = getTenantIdFromPhoneNumberId(phoneNumberId);
-          if (change.value && change.value.messages) {
-            const messages = change.value.messages;
-            messages.forEach((msg) => {
+          if (change.value && change.value.messages && change.value.messages.length > 0) {
+            senderWaId = change.value.messages[0].from;
+            change.value.messages.forEach((msg) => {
               extractedMessages.push({
                 from: msg.from,
                 type: msg.type,
@@ -129,44 +132,55 @@ module.exports = async function handler(req, res) {
         }
       }
 
-      // Forward al backend para que use el mismo pipeline que el chat web
+      const tenantId = getTenantIdFromPhoneNumberId(phoneNumberId);
+      console.log(`[${requestId}] 📱 phone_number_id=${phoneNumberId}, sender=${senderWaId}, tenant=${tenantId}, messages=${extractedMessages.length}`);
+
       const backendUrl = process.env.BACKEND_INGEST_URL;
       const sharedSecret = process.env.BACKEND_SHARED_SECRET;
 
-      if (!backendUrl || !sharedSecret) {
-        console.warn("⚠️ BACKEND_INGEST_URL o BACKEND_SHARED_SECRET no configurados, no se reenvía");
-      } else {
-        try {
-          const forwardPayload = {
-            tenant_id: tenantId,
-            phone_number_id: phoneNumberId,
-            payload: body,
-            timestamp: new Date().toISOString(),
-          };
-
-          const resp = await fetch(backendUrl, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${sharedSecret}`,
-              "X-Tenant-ID": tenantId,
-              "X-Phone-Number-ID": phoneNumberId || "",
-            },
-            body: JSON.stringify(forwardPayload),
-          });
-
-          const txt = await resp.text();
-          console.log(`➡️ Forwarded to backend (${resp.status}):`, txt.slice(0, 300));
-        } catch (err) {
-          console.error("❌ Error reenviando al backend:", err);
-        }
+      if (!backendUrl) {
+        console.error(`[${requestId}] ❌ BACKEND_INGEST_URL not configured`);
+        return res.status(500).json({ ok: false, error: "BACKEND_INGEST_URL not configured", request_id: requestId });
+      }
+      if (!sharedSecret) {
+        console.error(`[${requestId}] ❌ BACKEND_SHARED_SECRET not configured`);
+        return res.status(500).json({ ok: false, error: "BACKEND_SHARED_SECRET not configured", request_id: requestId });
       }
 
-      return res.status(200).json({ ok: true, received: true, tenant: tenantId, phone_number_id: phoneNumberId, messages: extractedMessages });
+      try {
+        const forwardPayload = {
+          tenant_id: tenantId,
+          phone_number_id: phoneNumberId,
+          payload: body,
+          timestamp: new Date().toISOString(),
+          request_id: requestId,
+        };
+
+        const resp = await fetch(backendUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${sharedSecret}`,
+            "X-Tenant-ID": tenantId,
+            "X-Phone-Number-ID": phoneNumberId || "",
+            "X-Request-ID": requestId,
+          },
+          body: JSON.stringify(forwardPayload),
+        });
+
+        const txt = await resp.text();
+        console.log(`[${requestId}] ➡️ backend status=${resp.status}, body=${txt.slice(0, 200)}`);
+        if (!resp.ok) console.error(`[${requestId}] ⚠️ backend error: ${txt}`);
+
+        return res.status(200).json({ ok: true, received: true, tenant: tenantId, phone_number_id: phoneNumberId, request_id: requestId });
+      } catch (err) {
+        console.error(`[${requestId}] ❌ Error forwarding:`, err.message);
+        return res.status(500).json({ ok: false, error: "Forward failed", request_id: requestId });
+      }
 
     } catch (error) {
-      console.error("❌ POST: Error:", error);
-      return res.status(200).json({ ok: true });
+      console.error(`[${requestId}] ❌ POST Error:`, error);
+      return res.status(200).json({ ok: true, request_id: requestId });
     }
   }
 

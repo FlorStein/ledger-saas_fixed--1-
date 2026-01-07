@@ -34,8 +34,16 @@ vercel --prod
 
 ### 3. Probá el endpoint de simulación
 
+Para no depender de Meta al inicio, usá el script de simulación:
+
 ```powershell
-# Simulación simple
+# Script automatizado (recomendado)
+.\scripts\test_simulate_whatsapp.ps1 `
+    -Message "Recibo de transferencia" `
+    -PhoneNumberId "123456789012345" `
+    -SenderWaId "5491123456789"
+
+# O manual con Invoke-WebRequest
 $body = @{
     entry = @(
         @{
@@ -43,15 +51,15 @@ $body = @{
                 @{
                     value = @{
                         metadata = @{
-                            phone_number_id = "123456789"
+                            phone_number_id = "123456789012345"
                         }
                         messages = @(
                             @{
-                                from = "5491234567890"
+                                from = "5491123456789"
                                 type = "text"
                                 text = @{ body = "Hola desde simulación" }
-                                timestamp = "1735689600"
-                                id = "wamid.test123"
+                                timestamp = [int]([DateTime]::UtcNow.Subtract([DateTime]::UnixEpoch).TotalSeconds)
+                                id = "wamid.test_$(Get-Random)"
                             }
                         )
                     }
@@ -61,23 +69,63 @@ $body = @{
     )
 } | ConvertTo-Json -Depth 10
 
-Invoke-WebRequest -Uri "https://tu-vercel-url.vercel.app/api/simulate-whatsapp" `
+Invoke-WebRequest `
+    -Uri "https://tu-vercel-url.vercel.app/api/simulate-whatsapp" `
     -Method POST `
     -Body $body `
     -ContentType "application/json"
 ```
 
+**Qué deberías ver:**
+- Vercel logs: `[requestId: xxxxxx] POST /api/simulate-whatsapp`
+- Backend logs: `📱 Meta Cloud Event - tenant: 1, phone_number_id: 123456789012345`
+- Backend logs: `📝 Text: Hola desde simulación...`
+- Database: Nuevo registro en `transactions` table
+
 ### 4. Verificá el health check
 
 ```powershell
-Invoke-WebRequest -Uri "http://localhost:8000/webhooks/whatsapp/meta/cloud/health"
+# Script automatizado (recomendado)
+.\scripts\test_health.ps1
+
+# O manual
+Invoke-RestMethod http://localhost:8000/webhooks/whatsapp/meta/cloud/health | ConvertTo-Json -Depth 5
 ```
 
-Debe mostrar:
-- ✅ META_WA_TOKEN: Set
-- ✅ BACKEND_SHARED_SECRET: Set
+**Qué deberías ver:**
+```json
+{
+  "status": "healthy",
+  "environment": {
+    "META_WA_TOKEN": "✅ Configured",
+    "BACKEND_SHARED_SECRET": "✅ Configured",
+    "META_WA_PHONE_NUMBER_ID": "123456789012345"
+  },
+  "database": {
+    "total_tenants": 1,
+    "meta_channels": 1,
+    "tenants": [
+      {
+        "id": 1,
+        "name": "default",
+        "phone_number_id": "123456789012345",
+        "channels": [
+          {
+            "external_id": "123456789012345",
+            "kind": "whatsapp"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+- ✅ META_WA_TOKEN: Configured (o ✅ Set)
+- ✅ BACKEND_SHARED_SECRET: Configured
 - ✅ META_WA_PHONE_NUMBER_ID: (tu número)
-- meta_channels: 1 o más
+- database.total_tenants: 1 o más
+- database.meta_channels: 1 o más
 
 ### 5. Probá con Meta real
 
@@ -109,40 +157,169 @@ META_APP_SECRET=abc123def456
 TENANT_ROUTING_JSON={"123456789": "1"}
 ```
 
-### 7. Troubleshooting
+### 7. Errores Comunes y Soluciones
 
-**El backend no recibe nada:**
-- Verificá que el túnel esté activo (`ngrok` o `cloudflared`)
-- Verificá `BACKEND_INGEST_URL` en Vercel
-- Verificá que `BACKEND_SHARED_SECRET` coincida en ambos lados
+#### Vercel endpoint returns 500
 
-**Error 401 Unauthorized:**
-- `BACKEND_SHARED_SECRET` no coincide entre Vercel y backend
+**Error en logs:**
+```
+Error: BACKEND_INGEST_URL not configured
+Error: BACKEND_SHARED_SECRET not configured
+```
 
-**Meta no verifica el webhook:**
-- `WHATSAPP_VERIFY_TOKEN` incorrecto en Vercel
-- La URL de Vercel debe ser HTTPS
+**Solución:**
+```powershell
+# Verificar que ambas variables estén en Vercel
+vercel env ls
 
-**Signature inválida:**
-- `META_APP_SECRET` incorrecto o faltante
-- El payload fue modificado (man-in-the-middle)
+# Si no están, agregarlas
+vercel env add BACKEND_INGEST_URL
+vercel env add BACKEND_SHARED_SECRET
 
-**Tenant no se resuelve:**
-- Falta el Channel en DB con `external_id = phone_number_id`
-- O falta `tenant.phone_number_id` seteado
-- Ejecutá seed nuevamente con `META_WA_PHONE_NUMBER_ID` en env
+# Redeploy
+vercel --prod
+```
+
+#### Backend returns 401 Unauthorized
+
+**Error en logs:**
+```
+❌ Authorization header missing or invalid
+```
+
+**Solución:**
+1. Verificá que Vercel tenga `BACKEND_SHARED_SECRET` seteado
+2. Verificá que coincida con `BACKEND_SHARED_SECRET` en backend `.env`
+3. El secret debe ser el mismo en ambos lados (sin "Bearer " prefix)
+
+```bash
+# Backend
+cat backend/.env | grep BACKEND_SHARED_SECRET
+
+# Vercel
+vercel env ls | grep BACKEND_SHARED_SECRET
+```
+
+#### Meta webhook verification fails
+
+**Error en Meta Developers console:**
+```
+The URL couldn't be validated. Callback URL and verify token do not match.
+```
+
+**Solución:**
+1. Verificá que `WHATSAPP_VERIFY_TOKEN` en Vercel sea idéntico al que pusiste en Meta
+2. Verificá que la URL de Vercel sea HTTPS (no HTTP)
+3. Verificá que `META_APP_SECRET` esté seteado en Vercel
+
+```powershell
+# Ver el token que Meta está esperando
+vercel env ls | grep WHATSAPP_VERIFY_TOKEN
+
+# Copiar exactamente ese valor a Meta Developers > Configuration
+```
+
+#### X-Hub-Signature-256 validation failed
+
+**Error en logs Vercel:**
+```
+❌ Invalid signature: signature mismatch
+```
+
+**Solución:**
+1. Verificá que `META_APP_SECRET` coincida con el App Secret en Meta Developers
+2. Verificá que el raw body esté siendo leído correctamente (esto está automatizado en whatsapp-webhook.js)
+3. Desactiva momentáneamente la validación para debuggear (busca `validateSignature` en api/whatsapp-webhook.js)
+
+#### Tenant not resolved (falls back to tenant_id 1)
+
+**Advertencia en logs:**
+```
+⚠️  Could not resolve tenant, using default tenant_id 1
+```
+
+**Solución:**
+1. Ejecuta el seed del backend con la variable correcta:
+```bash
+# Windows
+cd backend
+$env:META_WA_PHONE_NUMBER_ID = "123456789012345"
+.\.venv\Scripts\python.exe app/seed.py
+
+# O manualmente agregar el Channel:
+# INSERT INTO channels (tenant_id, provider, kind, external_id) 
+#   VALUES (1, 'meta', 'whatsapp', '123456789012345');
+```
+
+2. Verificá que el phone_number_id en el payload Meta coincida con `META_WA_PHONE_NUMBER_ID`
+
+#### Backend receives event but doesn't persist to database
+
+**Solución:**
+1. Verificá que SQLite esté funcionando:
+```powershell
+cd backend
+# Ver todos los transactions
+.\.venv\Scripts\python.exe -c "from app.db import SessionLocal; from app.models import Transaction; db = SessionLocal(); print(db.query(Transaction).count()); db.close()"
+```
+
+2. Verificá que el backend pueda escribir en `./app.db`:
+```powershell
+# Verificar permisos
+Get-Acl "backend/app.db" | Format-List
+```
+
+3. Revisá los logs del backend para `Error persisting WhatsAppEvent` o `Error saving file`
 
 ### 8. Comandos útiles
 
 ```powershell
-# Ver logs de Vercel en tiempo real
+# ========== BACKEND CHECKS ==========
+
+# Ver health endpoint
+.\scripts\test_health.ps1
+
+# O manualmente
+Invoke-RestMethod http://localhost:8000/webhooks/whatsapp/meta/cloud/health | ConvertTo-Json -Depth 5
+
+# Contar transacciones recibidas
+cd backend
+.\.venv\Scripts\python.exe -c "from app.db import SessionLocal; from app.models import Transaction; db = SessionLocal(); count = db.query(Transaction).filter_by(source_system='whatsapp').count(); print(f'WhatsApp Transactions: {count}'); db.close()"
+
+# Ver últimas transacciones
+.\.venv\Scripts\python.exe -c "from app.db import SessionLocal; from app.models import Transaction; db = SessionLocal(); txs = db.query(Transaction).filter_by(source_system='whatsapp').order_by(Transaction.id.desc()).limit(5).all(); [print(f'{t.id}: {t.doc_type} - {t.amount} {t.currency}') for t in txs]; db.close()"
+
+# Recrear DB desde cero
+Remove-Item app.db -ErrorAction SilentlyContinue
+.\.venv\Scripts\python.exe -c "from app.db import init_db; from app.seed import seed_if_empty; from app.db import SessionLocal; init_db(); db = SessionLocal(); seed_if_empty(db); db.close()"
+
+# ========== VERCEL CHECKS ==========
+
+# Ver logs en tiempo real
 vercel logs --follow
 
-# Recrear DB con tenant/channel correcto
-cd backend
-Remove-Item app.db
-& .\.venv\Scripts\python.exe -c "from app.db import init_db; from app.seed import seed_if_empty; from app.db import SessionLocal; init_db(); db = SessionLocal(); seed_if_empty(db); db.close()"
+# Ver todas las variables de entorno
+vercel env ls
 
-# Ver health check
-Invoke-RestMethod http://localhost:8000/webhooks/whatsapp/meta/cloud/health | ConvertTo-Json -Depth 5
-```
+# Redeploy después de cambiar env vars
+vercel --prod
+
+# Ver logs de una función específica
+vercel logs api/whatsapp-webhook.js
+
+# ========== TESTING ==========
+
+# Test simulate endpoint
+.\scripts\test_simulate_whatsapp.ps1 -Message "Test from script" -PhoneNumberId "123456789012345"
+
+# Test con diferentes tipos de mensaje
+.\scripts\test_simulate_whatsapp.ps1 -Message "Recibo de transferencia adjunto" -PhoneNumberId "123456789012345" -SenderWaId "5491234567890"
+
+# ========== TUNNEL ==========
+
+# ngrok (si no está instalado: choco install ngrok)
+ngrok http 8000
+# Copiá la URL https://xxx.ngrok.io y usala como BACKEND_INGEST_URL
+
+# Cloudflare tunnel
+cloudflared tunnel --url http://localhost:8000
