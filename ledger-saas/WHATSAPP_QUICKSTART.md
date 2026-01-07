@@ -2,7 +2,42 @@
 
 ## Para probar HOY sin más vueltas
 
-### 1. Exponé tu backend con un túnel
+### 0. Preparar la Base de Datos (Dev Only)
+
+Como usamos SQLite sin Alembic, cualquier cambio en modelos requiere recrear la BD.
+**IMPORTANTE:** Primero navegá al directorio del proyecto:
+
+```powershell
+cd "c:\Users\mfrst\Downloads\ledger-saas_fixed (1)\ledger-saas"
+```
+#### Con PowerShell (recomendado):
+```powershell
+cd backend
+Remove-Item .\app.db -ErrorAction SilentlyContinue
+& .\.venv\Scripts\python.exe -c "from app.db import Base, engine, SessionLocal; from app.seed import seed_if_empty; Base.metadata.create_all(bind=engine); db=SessionLocal(); seed_if_empty(db); db.close()"
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+#### Con CMD (Windows):
+```cmd
+cd backend
+if exist app.db del app.db
+.venv\Scripts\python.exe -c "from app.db import Base, engine, SessionLocal; from app.seed import seed_if_empty; Base.metadata.create_all(bind=engine); db=SessionLocal(); seed_if_empty(db); db.close()"
+.venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+#### Con bash (mac/linux):
+```bash
+cd backend
+rm -f app.db
+source .venv/bin/activate
+python -c "from app.db import Base, engine, SessionLocal; from app.seed import seed_if_empty; Base.metadata.create_all(bind=engine); db=SessionLocal(); seed_if_empty(db); db.close()"
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+**Nota:** Usamos `created_at` y `updated_at` con `server_default=func.now()` (BD maneja timestamps, no Python). Si ves errores de "no such column", ejecutá el reset arriba.
+
+Ahora exponé el backend con un túnel:
 
 **Opción A: ngrok**
 ```powershell
@@ -15,7 +50,7 @@ Te dará una URL tipo: `https://abc123.ngrok.io`
 cloudflared tunnel --url http://localhost:8000
 ```
 
-### 2. Configurá las variables en Vercel
+### 1. Configurá las variables en Vercel
 
 ```powershell
 cd "c:\Users\mfrst\Downloads\ledger-saas_fixed (1)\ledger-saas"
@@ -32,7 +67,7 @@ vercel env add BACKEND_SHARED_SECRET
 vercel --prod
 ```
 
-### 3. Probá el endpoint de simulación
+### 2. Probá el endpoint de simulación
 
 Para no depender de Meta al inicio, usá el script de simulación:
 
@@ -82,7 +117,7 @@ Invoke-WebRequest `
 - Backend logs: `📝 Text: Hola desde simulación...`
 - Database: Nuevo registro en `transactions` table
 
-### 4. Verificá el health check
+### 3. Verificá el health check
 
 ```powershell
 # Script automatizado (recomendado)
@@ -127,7 +162,7 @@ Invoke-RestMethod http://localhost:8000/webhooks/whatsapp/meta/cloud/health | Co
 - database.total_tenants: 1 o más
 - database.meta_channels: 1 o más
 
-### 5. Probá con Meta real
+### 4. Probá con Meta real
 
 Una vez que funcione la simulación y el backend reciba el evento:
 
@@ -137,7 +172,7 @@ Una vez que funcione la simulación y el backend reciba el evento:
 4. Suscribite a: `messages`
 5. Enviá un mensaje de prueba al número de WhatsApp Business
 
-### 6. Variables de entorno completas
+### 5. Variables de entorno completas
 
 **Backend (.env)**
 ```env
@@ -157,7 +192,7 @@ META_APP_SECRET=abc123def456
 TENANT_ROUTING_JSON={"123456789": "1"}
 ```
 
-### 7. Errores Comunes y Soluciones
+### 6. Errores Comunes y Soluciones
 
 #### Vercel endpoint returns 500
 
@@ -253,7 +288,7 @@ $env:META_WA_PHONE_NUMBER_ID = "123456789012345"
 
 2. Verificá que el phone_number_id en el payload Meta coincida con `META_WA_PHONE_NUMBER_ID`
 
-#### Backend receives event but doesn't persist to database
+#### Backend recibe evento pero no persiste a la base de datos
 
 **Solución:**
 1. Verificá que SQLite esté funcionando:
@@ -271,7 +306,7 @@ Get-Acl "backend/app.db" | Format-List
 
 3. Revisá los logs del backend para `Error persisting WhatsAppEvent` o `Error saving file`
 
-### 8. Comandos útiles
+### 7. Comandos útiles
 
 ```powershell
 # ========== BACKEND CHECKS ==========
@@ -323,3 +358,35 @@ ngrok http 8000
 
 # Cloudflare tunnel
 cloudflared tunnel --url http://localhost:8000
+---
+
+## Deployment en Vercel (Monorepo)
+
+Este proyecto usa una estructura de monorepo:
+- `frontend/` - Aplicación Vite/React (se sirve en `/`)
+- `api/` - Funciones serverless Node.js (se sirven en `/api/*`)
+- `backend/` - FastAPI local (NO se deploya; se expone con ngrok/cloudflare)
+
+**Configuración clave:**
+
+1. **NO cambiar Root Directory** en Vercel settings - dejar en `.` (raíz)
+2. El archivo `vercel.json` en la raíz controla todo:
+   - Build del frontend usando `@vercel/static-build`
+   - Build de funciones API usando `@vercel/node`
+   - Rutas: `/api/*` → funciones, `/*` → frontend estático
+
+3. **Para deployar:**
+   ```powershell
+   cd "c:\Users\mfrst\Downloads\ledger-saas_fixed (1)\ledger-saas"
+   vercel --prod
+   ```
+
+4. **Resultado esperado:**
+   - `https://tu-app.vercel.app/` → muestra el frontend React
+   - `https://tu-app.vercel.app/api/simulate-whatsapp` → función serverless
+   - `https://tu-app.vercel.app/api/whatsapp-webhook` → recibe webhooks de Meta
+
+**Nota:** Si el frontend no se ve después del deploy, verificá:
+- Que `frontend/package.json` tenga `"build": "vite build"`
+- Que `vercel.json` esté en la raíz (no en subdirectorios)
+- Los logs de build en Vercel dashboard

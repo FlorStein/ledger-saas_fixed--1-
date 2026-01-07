@@ -330,6 +330,7 @@ async def meta_cloud_health(db: Session = Depends(get_db)):
             "name": t.name or t.id,
             "phone_number_id": t.phone_number_id or "not_set",
             "created_at": t.created_at.isoformat() if t.created_at else None,
+            "updated_at": t.updated_at.isoformat() if t.updated_at else None,
             "channels": [
                 {
                     "external_id": c.external_id,

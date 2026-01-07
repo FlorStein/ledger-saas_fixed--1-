@@ -1,16 +1,25 @@
 from datetime import datetime
-from sqlalchemy import String, Numeric, Boolean, Integer, ForeignKey, UniqueConstraint
+from sqlalchemy import String, Numeric, Boolean, Integer, ForeignKey, UniqueConstraint, DateTime, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .db import Base
 
-class Tenant(Base):
+class TimestampMixin:
+    """Mixin para agregar created_at y updated_at a modelos.
+    
+    Usa server_default=func.now() para consistencia en entornos multi-worker.
+    La BD es responsable de los timestamps, no la aplicación.
+    """
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+class Tenant(Base, TimestampMixin):
     __tablename__ = "tenants"
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(120))
     status: Mapped[str] = mapped_column(String(20), default="active")
     phone_number_id: Mapped[str | None] = mapped_column(String(40), unique=True, nullable=True)
 
-class User(Base):
+class User(Base, TimestampMixin):
     __tablename__ = "users"
     __table_args__ = (
         UniqueConstraint("tenant_id", "whatsapp_wa_id", name="uq_user_whatsapp_wa_id"),
@@ -28,7 +37,7 @@ class User(Base):
 
     tenant = relationship("Tenant")
 
-class Counterparty(Base):
+class Counterparty(Base, TimestampMixin):
     __tablename__ = "counterparties"
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id"))
@@ -43,7 +52,7 @@ class Counterparty(Base):
 
     tenant = relationship("Tenant")
 
-class Sale(Base):
+class Sale(Base, TimestampMixin):
     __tablename__ = "sales"
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id"))
@@ -60,7 +69,7 @@ class Sale(Base):
 
     status: Mapped[str] = mapped_column(String(20), default="open")  # open/matched
 
-class Transaction(Base):
+class Transaction(Base, TimestampMixin):
     __tablename__ = "transactions"
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id"))
@@ -111,7 +120,7 @@ class Transaction(Base):
     payer_counterparty = relationship("Counterparty", foreign_keys=[payer_counterparty_id])
     payee_counterparty = relationship("Counterparty", foreign_keys=[payee_counterparty_id])
 
-class Channel(Base):
+class Channel(Base, TimestampMixin):
     """Canal de ingreso por tenant (por ahora WhatsApp)."""
     __tablename__ = "channels"
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -145,7 +154,7 @@ class WhatsAppInboundMessage(Base):
     }
 
 
-class WhatsAppEvent(Base):
+class WhatsAppEvent(Base, TimestampMixin):
     __tablename__ = "whatsapp_events"
     __table_args__ = ({"sqlite_autoincrement": True},)
 
@@ -156,12 +165,11 @@ class WhatsAppEvent(Base):
     message_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     timestamp: Mapped[str | None] = mapped_column(String(30), nullable=True)
     raw_payload: Mapped[str | None] = mapped_column(String(4000), nullable=True)
-    created_at: Mapped[str] = mapped_column(String(30), default=lambda: datetime.utcnow().isoformat())
 
     tenant = relationship("Tenant")
 
 
-class IncomingMessage(Base):
+class IncomingMessage(Base, TimestampMixin):
     __tablename__ = "incoming_messages"
     __table_args__ = (
         UniqueConstraint("tenant_id", "message_id", name="uq_incoming_message"),
@@ -177,6 +185,5 @@ class IncomingMessage(Base):
     content: Mapped[str | None] = mapped_column(String(2000), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="queued")  # queued/processing/done
     timestamp: Mapped[str | None] = mapped_column(String(30), nullable=True)
-    created_at: Mapped[str] = mapped_column(String(30), default=lambda: datetime.utcnow().isoformat())
 
     tenant = relationship("Tenant")

@@ -89,6 +89,7 @@ module.exports = async function handler(req, res) {
         "X-Tenant-ID": tenantId,
         "X-Phone-Number-ID": phoneNumberId || "",
         "X-Request-ID": requestId,
+        "ngrok-skip-browser-warning": "true",
       },
       body: JSON.stringify(forwardPayload),
     });

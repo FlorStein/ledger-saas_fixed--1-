@@ -164,14 +164,7 @@ module.exports = async function handler(req, res) {
             "X-Tenant-ID": tenantId,
             "X-Phone-Number-ID": phoneNumberId || "",
             "X-Request-ID": requestId,
-          },
-          body: JSON.stringify(forwardPayload),
-        });
-
-        const txt = await resp.text();
-        console.log(`[${requestId}] ➡️ backend status=${resp.status}, body=${txt.slice(0, 200)}`);
-        if (!resp.ok) console.error(`[${requestId}] ⚠️ backend error: ${txt}`);
-
+        "ngrok-skip-browser-warning": "true",
         return res.status(200).json({ ok: true, received: true, tenant: tenantId, phone_number_id: phoneNumberId, request_id: requestId });
       } catch (err) {
         console.error(`[${requestId}] ❌ Error forwarding:`, err.message);
